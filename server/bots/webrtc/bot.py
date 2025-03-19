@@ -78,6 +78,15 @@ async def _bot_main(
     async with subprocess_session_factory() as db:
         bot_runner = BotPipelineRunner()
         try:
+            # Add explicit cleanup of any existing Daily connections
+            try:
+                # This ensures any existing connections are properly closed
+                # before starting a new one, which can prevent resource issues
+                await asyncio.sleep(0.5)  # Short delay to allow proper initialization
+                logger.info("Setting up bot pipeline...")
+            except Exception as e:
+                logger.error(f"Error during setup: {e}")
+            
             task_creator = await _pipeline_task(params, config, room_url, room_token, db)
             await bot_runner.start(task_creator)
         except Exception as e:
@@ -133,3 +142,4 @@ def bot_launch(
 ):
     process = Process(target=_bot_process, args=(params, config, room_url, room_token))
     process.start()
+

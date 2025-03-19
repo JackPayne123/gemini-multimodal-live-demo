@@ -226,7 +226,9 @@ async def get_conversation_messages(
     # Generate title summary if conversation has no title and has more than 3 messages
     message_count = len(messages)
     if conversation.title == "New conversation" and message_count > 3:
-        background_tasks.add_task(generate_conversation_summary, conversation_id, db)
+        # Temporarily disabled summarization to avoid errors
+        # background_tasks.add_task(generate_conversation_summary, conversation_id, db)
+        pass  # Do nothing instead
 
     return {
         "conversation": ConversationModel.model_validate(conversation),

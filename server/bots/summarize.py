@@ -50,7 +50,8 @@ async def generate_summary_with_llm(messages: List[Dict[str, str]]) -> Optional[
         ctx = OpenAILLMContext(messages)
 
         sys_ctx_aggregator = llm.create_context_aggregator(
-            ctx, assistant_expect_stripped_words=False
+            ctx
+            #, assistant_expect_stripped_words=False
         )
         ctx_frame = OpenAILLMContextFrame(ctx)
         if isinstance(llm, GoogleLLMService):
