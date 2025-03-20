@@ -22,10 +22,13 @@ from pipecat.processors.frameworks.rtvi import (
     RTVISpeakingProcessor,
     RTVIUserTranscriptionProcessor,
 )
+from pipecat.services.google import GoogleLLMService, LLMSearchResponseFrame
+
 from pipecat.services.ai_services import OpenAILLMContext
 from pipecat.services.gemini_multimodal_live.gemini import (
     GeminiMultimodalLiveLLMService,
     InputParams,
+    GeminiMultimodalModalities
 )
 from pipecat.adapters.schemas.tools_schema import AdapterType, ToolsSchema
 from pipecat.adapters.schemas.function_schema import FunctionSchema
@@ -37,6 +40,8 @@ from openai.types.chat import (
 from pipecat.frames.frames import TTSSpeakFrame
 from pipecat.transports.services.daily import DailyParams, DailyTransport
 from vertexai import rag
+from pipecat.frames.frames import TranscriptionFrame, TextFrame, Frame
+from pipecat.transports.services.daily import TransportMessageUrgentFrame
 
 async def retrieve_information(function_name, tool_call_id, args, llm, context, result_callback):
     """Retrieve information from Vertex RAG corpus based on a query."""
@@ -170,6 +175,31 @@ async def query_database_from_api(function_name, tool_call_id, args, llm, contex
     )
 
 
+class SendMessageFrame(FrameProcessor):
+    def __init__(self):
+        super().__init__()
+        self._name = "message"
+        
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        try:
+            await super().process_frame(frame, direction)
+            
+            if isinstance(frame, TranscriptionFrame):
+                # User speech transcription
+                data = {"text": frame.text, "sender": "user"}
+                message = TransportMessageUrgentFrame(message={"type": "message", "data": data})
+                await self.push_frame(message)
+            elif isinstance(frame, TextFrame):
+                # LLM response text
+                data = {"text": frame.text, "sender": "robot"}
+                message = TransportMessageUrgentFrame(message={"type": "message", "data": data})
+                await self.push_frame(message)
+                
+            await self.push_frame(frame, direction)
+        except Exception as e:
+            logger.debug(f"Exception in SendMessageFrame: {e}")
+
+
 async def bot_pipeline(
     params: BotParams,
     config: BotConfig,
@@ -177,6 +207,7 @@ async def bot_pipeline(
     room_url: str,
     room_token: str,
     db: AsyncSession,
+    text_only_mode: bool = False,  # Add text_only_mode parameter
 ) -> Pipeline:
     transport = DailyTransport(
         room_url,
@@ -184,9 +215,9 @@ async def bot_pipeline(
         "Gemini Bot",
         DailyParams(
             audio_in_sample_rate=16000,
-            audio_out_enabled=True,
+            audio_out_enabled=not text_only_mode,  # Disable audio output in text-only mode
             audio_out_sample_rate=24000,
-            transcription_enabled=False,
+            #transcription_enabled=True,  # Explicitly enable transcription
             vad_enabled=True,
             vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=0.5)),
             vad_audio_passthrough=True,
@@ -252,7 +283,7 @@ async def bot_pipeline(
 
     # System instruction to guide the bot
     system_instruction = """
-    You are a wine and beer expert with vast knowledge of food and drink pairings and details about tasting notes and other interesting aspects of wine. 
+    You are a wine expert with vast knowledge of food and drink pairings and details about tasting notes and other interesting aspects of wine. 
     
     You can also retrieve information using the "retrieve_information" tool. If the user asks a question that requires
     looking up specific information, use this tool to find relevant data.
@@ -270,15 +301,28 @@ async def bot_pipeline(
 
     ##You are a helpful assistant who can answer questions and use tools.
 
-    # Configure Gemini service
-    llm_rt = FixedGeminiMultimodalLiveLLMService(
-        api_key=str(SERVICE_API_KEYS["gemini"]),
-        voice_id="Charon",  # Puck, Charon, Kore, Fenrir, Aoede
-        transcribe_user_audio=True,
-        transcribe_model_audio=True,
-        tools=tools_schema,
-        system_instruction=system_instruction,
-    )
+    # Configure Gemini service with appropriate modality
+    if text_only_mode:
+        llm_rt = FixedGeminiMultimodalLiveLLMService(
+            api_key=str(SERVICE_API_KEYS["gemini"]),
+            voice_id="Charon",
+            transcribe_user_audio=True,
+            transcribe_model_audio=True,
+            tools=tools_schema,
+            system_instruction=system_instruction,
+            params=InputParams(modalities=GeminiMultimodalModalities.TEXT),  # Set text-only modality
+        )
+        # Print a note about text-only mode
+        print("Running in text-only mode. Audio output disabled.")
+    else:
+        llm_rt = FixedGeminiMultimodalLiveLLMService(
+            api_key=str(SERVICE_API_KEYS["gemini"]),
+            voice_id="Charon",  # Puck, Charon, Kore, Fenrir, Aoede
+            transcribe_user_audio=True,
+            transcribe_model_audio=True,
+            tools=tools_schema,
+            system_instruction=system_instruction,
+        )
 
     # Store db session on the LLM service for access from function handlers
     #llm_rt.db_session = db
@@ -322,17 +366,25 @@ async def bot_pipeline(
     # This will send `bot-tts-*` messages.
     rtvi_bot_tts = RTVIBotTTSProcessor(direction=FrameDirection.UPSTREAM)
 
+    # Create message senders for user and robot messages
+    user_send = SendMessageFrame()
+    robot_send = SendMessageFrame()
+    
+    # Build processors list with message senders
     processors = [
         transport.input(),
         rtvi,
         user_aggregator,
+        #user_send,  # Add user message sender
         llm_rt,
         rtvi_speaking,
         rtvi_bot_llm,
+        robot_send,  # Add robot message sender
         transport.output(),
         assistant_aggregator,
         storage.create_processor(exit_on_endframe=True),
     ]
+
 
     pipeline = Pipeline(processors)
 
